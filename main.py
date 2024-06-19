@@ -139,7 +139,7 @@ class ImageLabel(QLabel):
     def openImage(self):
         '''Load a new image into the '''
         image_file, _ = QFileDialog.getOpenFileName(self, 'Open Image',
-                '', 'PNG Files (*.png);;JPG Files (*.jpeg *.jpg);;Bitmap Files (*.bmp);;\
+                '', 'JPG Files (*.jpeg *.jpg);;PNG Files (*.png);;Bitmap Files (*.bmp);;\
                 GIF Files (*.gif)')
 
         if image_file:
@@ -572,9 +572,14 @@ class PhotoEditorGUI(QMainWindow):
                 return
 
             # save image
-            output_dir = os.path.expanduser('~/Desktop')
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            download_dir = os.path.join('~', 'Downloads')
+            output_dir = os.path.expanduser(download_dir)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             output_file = Path(image_file).stem + f'-PixStudio-{timestamp}' + Path(image_file).suffix
+            print(output_file)
             file_name = os.path.basename(output_file)
             output_path = os.path.join(output_dir, file_name)
             cv2.imwrite(output_path, image)
