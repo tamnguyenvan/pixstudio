@@ -4,18 +4,21 @@ import time
 import random
 from datetime import datetime
 from pathlib import Path
+from typing import Tuple
+
 import cv2
-from PySide6.QtWidgets import (QApplication, QMainWindow, QLabel,
+import numpy as np
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QLabel,
     QToolBar, QMessageBox, QFileDialog,
     QScrollArea, QSizePolicy, QRubberBand,
-    QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
-    QGraphicsDropShadowEffect
+    QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QSpinBox,
+    QGraphicsDropShadowEffect, QFrame,
 )
 from PySide6.QtCore import Qt, QSize, QRect, QPoint, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPen, QIcon, QPixmap, QImage, QTransform, QPalette, qRgb, QColor, QAction, QCursor
 import resources
 
-ICON_DIR = 'icons'
 
 
 class CustomButton(QWidget):
@@ -118,7 +121,9 @@ class ImageLabel(QLabel):
         super().__init__(parent)
         self.parent = parent
 
+        self.original_image = QImage()
         self.image = QImage()
+        self.image_copy = QImage()
         self.image_file = None
         self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
 
@@ -129,7 +134,7 @@ class ImageLabel(QLabel):
         self.setPixmap(QPixmap().fromImage(self.image))
         self.setAlignment(Qt.Alignment.AlignCenter)
 
-        self.points = []
+        self.rects = []
 
     def openImage(self):
         '''Load a new image into the '''
@@ -138,6 +143,8 @@ class ImageLabel(QLabel):
                 GIF Files (*.gif)')
 
         if image_file:
+            self.clear()
+
             self.image_file = image_file
             # Reset values when opening an image
             self.parent.zoom_factor = 1
@@ -148,7 +155,9 @@ class ImageLabel(QLabel):
             # self.parent.brightness_slider.setValue(0)
 
             # Get image format
-            self.image = QImage(image_file)
+            self.original_image = QImage(image_file)
+            self.image = self.original_image.copy()
+            self.image_copy = self.original_image.copy()
 
             #pixmap = QPixmap(image_file)
             self.setPixmap(QPixmap().fromImage(self.image))
@@ -165,23 +174,6 @@ class ImageLabel(QLabel):
         else:
             QMessageBox.information(self, 'Error',
                 'Unable to open image.', QMessageBox.Ok)
-
-    def saveImage(self):
-        '''Save the image displayed in the label.'''
-        #TODO: Add different functionality for the way in which the user can save their image.
-        if self.image.isNull() == False:
-            image_file, _ = QFileDialog.getSaveFileName(self, 'Save Image',
-                '', 'PNG Files (*.png);;JPG Files (*.jpeg *.jpg );;Bitmap Files (*.bmp);;\
-                    GIF Files (*.gif)')
-
-            if image_file and self.image.isNull() == False:
-                self.image.save(image_file)
-            else:
-                QMessageBox.information(self, 'Error',
-                    'Unable to save image.', QMessageBox.Ok)
-        else:
-            QMessageBox.information(self, 'Empty Image',
-                    'There is no image to save.', QMessageBox.Ok)
 
     def resizeImage(self):
         '''Resize image.'''
@@ -203,9 +195,11 @@ class ImageLabel(QLabel):
             pass
 
     def clear(self):
-        self.image = QImage()
-        self.image_file = None
-        self.points = []
+        self.image = self.original_image.copy()
+        self.image_copy = self.original_image.copy()
+        self.rects = []
+        self.clear_sidebar()
+        self.setPixmap(QPixmap.fromImage(self.image))
         self.repaint()
 
     def mousePressEvent(self, event):
@@ -223,18 +217,98 @@ class ImageLabel(QLabel):
             self.rubber_band.hide()
             rect = self.rubber_band.geometry()
             if rect.isValid():
-                self.points.append(rect)
+                id = len(self.rects)
+                self.rects.append(rect)
 
-                painter = QPainter(self.image)
-                painter.setPen(QPen(Qt.GlobalColor.blue, 2, Qt.PenStyle.SolidLine))
-                painter.drawRect(rect)
-                painter.end()
-                self.setPixmap(QPixmap.fromImage(self.image))
+                image = self.draw_placeholder(self.image_copy, rect, id=id)
+                self.setPixmap(QPixmap.fromImage(image))
 
-            if self.points:
+                pattern_controller = PatternController(id=id, rect=rect)
+                pattern_controller.x_changed.connect(self.on_placeholder_x_change)
+                pattern_controller.y_changed.connect(self.on_placeholder_y_change)
+                pattern_controller.width_changed.connect(self.on_placeholder_width_change)
+                pattern_controller.height_changed.connect(self.on_placeholder_height_change)
+
+                self.parent.sidebar_layout.addWidget(pattern_controller)
+
+            if self.rects:
+                self.parent.run_button.enable()
                 self.parent.export_button.enable()
 
             self.origin = QPoint()
+
+    def on_placeholder_x_change(self, event):
+        id, value = event
+        if id < len(self.rects):
+            rect = self.rects[id]
+            rect = QRect(value, rect.top(), rect.width(), rect.height())
+            self.rects[id] = rect
+
+        image = self.redraw_placeholders(self.image.copy(), self.rects)
+        self.setPixmap(QPixmap.fromImage(image))
+
+    def on_placeholder_y_change(self, event):
+        id, value = event
+        if id < len(self.rects):
+            rect = self.rects[id]
+            rect = QRect(rect.left(), value, rect.width(), rect.height())
+            self.rects[id] = rect
+
+        image = self.redraw_placeholders(self.image.copy(), self.rects)
+        self.setPixmap(QPixmap.fromImage(image))
+
+    def on_placeholder_width_change(self, event):
+        id, value = event
+        if id < len(self.rects):
+            rect = self.rects[id]
+            rect = QRect(rect.left(), rect.top(), value, rect.height())
+            self.rects[id] = rect
+
+        image = self.redraw_placeholders(self.image.copy(), self.rects)
+        self.setPixmap(QPixmap.fromImage(image))
+
+    def on_placeholder_height_change(self, event):
+        id, value = event
+        if id < len(self.rects):
+            rect = self.rects[id]
+            rect = QRect(rect.left(), rect.top(), rect.width(), value)
+            self.rects[id] = rect
+
+        image = self.redraw_placeholders(self.image.copy(), self.rects)
+        self.setPixmap(QPixmap.fromImage(image))
+
+    def draw_placeholder(self, image, rect, id=None):
+        painter = QPainter(image)
+        painter.setPen(QPen(Qt.GlobalColor.blue, 2, Qt.PenStyle.SolidLine))
+        painter.drawRect(rect)
+
+        # Cross lines
+        tr = QPoint(rect.x() + rect.width(), rect.y())
+        bl = QPoint(rect.x(), rect.y() + rect.height())
+        painter.drawLine(tr, bl)
+        painter.drawLine(rect.topLeft(), rect.bottomRight())
+
+        # Placeholder id
+        if id is not None:
+            tl = rect.topLeft()
+            painter.drawText(QPoint(tl.x(), tl.y() - 5), str(id))
+
+        painter.end()
+        return image
+
+    def redraw_placeholders(self, image, rects):
+        for i, rect in enumerate(rects):
+            image = self.draw_placeholder(image, rect, i + 1)
+        return image
+
+    def clear_sidebar(self):
+        self.delete_all_children(self.parent.sidebar_widget)
+
+    def delete_all_children(self, widget):
+        while widget.layout().count():
+            child = widget.layout().takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
 
 
 class PhotoEditorGUI(QMainWindow):
@@ -264,57 +338,57 @@ class PhotoEditorGUI(QMainWindow):
 
         self.show()
 
-    def createMenu(self):
-        '''Set up the menubar.'''
+    # def createMenu(self):
+    #     '''Set up the menubar.'''
 
-        self.exit_act = QAction(QIcon(os.path.join(ICON_DIR, 'exit.png')), 'Quit PixStudio', self)
-        self.exit_act.setShortcut('Ctrl+Q')
-        self.exit_act.triggered.connect(self.close)
+    #     self.exit_act = QAction(QIcon(os.path.join(ICON_DIR, 'exit.png')), 'Quit PixStudio', self)
+    #     self.exit_act.setShortcut('Ctrl+Q')
+    #     self.exit_act.triggered.connect(self.close)
 
-        # Actions for File menu
-        self.new_act = QAction(QIcon(os.path.join(ICON_DIR, 'new.png')), 'New...')
+    #     # Actions for File menu
+    #     self.new_act = QAction(QIcon(os.path.join(ICON_DIR, 'new.png')), 'New...')
 
-        self.open_act = QAction(QIcon(os.path.join(ICON_DIR, 'open.png')),'Open...', self)
-        self.open_act.setShortcut('Ctrl+O')
-        self.open_act.triggered.connect(self.image_label.openImage)
+    #     self.open_act = QAction(QIcon(os.path.join(ICON_DIR, 'open.png')),'Open...', self)
+    #     self.open_act.setShortcut('Ctrl+O')
+    #     self.open_act.triggered.connect(self.image_label.openImage)
 
-        self.zoom_in_act = QAction(QIcon(os.path.join(ICON_DIR, 'zoom_in.png')), 'Zoom In', self)
-        self.zoom_in_act.setShortcut('Ctrl++')
-        self.zoom_in_act.triggered.connect(lambda: self.zoomOnImage(1.25))
-        self.zoom_in_act.setEnabled(False)
+    #     self.zoom_in_act = QAction(QIcon(os.path.join(ICON_DIR, 'zoom_in.png')), 'Zoom In', self)
+    #     self.zoom_in_act.setShortcut('Ctrl++')
+    #     self.zoom_in_act.triggered.connect(lambda: self.zoomOnImage(1.25))
+    #     self.zoom_in_act.setEnabled(False)
 
-        self.zoom_out_act = QAction(QIcon(os.path.join(ICON_DIR, 'zoom_out.png')), 'Zoom Out', self)
-        self.zoom_out_act.setShortcut('Ctrl+-')
-        self.zoom_out_act.triggered.connect(lambda: self.zoomOnImage(0.8))
-        self.zoom_out_act.setEnabled(False)
+    #     self.zoom_out_act = QAction(QIcon(os.path.join(ICON_DIR, 'zoom_out.png')), 'Zoom Out', self)
+    #     self.zoom_out_act.setShortcut('Ctrl+-')
+    #     self.zoom_out_act.triggered.connect(lambda: self.zoomOnImage(0.8))
+    #     self.zoom_out_act.setEnabled(False)
 
-        # Actions for Views menu
+    #     # Actions for Views menu
 
-        # Create menubar
-        menu_bar = self.menuBar()
-        menu_bar.setNativeMenuBar(False)
+    #     # Create menubar
+    #     menu_bar = self.menuBar()
+    #     menu_bar.setNativeMenuBar(False)
 
-        # Create file menu and add actions
-        file_menu = menu_bar.addMenu('File')
-        file_menu.addAction(self.open_act)
+    #     # Create file menu and add actions
+    #     file_menu = menu_bar.addMenu('File')
+    #     file_menu.addAction(self.open_act)
 
-        tool_menu = menu_bar.addMenu('Tools')
-        tool_menu.addSeparator()
-        tool_menu.addAction(self.zoom_in_act)
-        tool_menu.addAction(self.zoom_out_act)
+    #     tool_menu = menu_bar.addMenu('Tools')
+    #     tool_menu.addSeparator()
+    #     tool_menu.addAction(self.zoom_in_act)
+    #     tool_menu.addAction(self.zoom_out_act)
 
-    def createToolBar(self):
-        '''Set up the toolbar.'''
-        tool_bar = QToolBar('Main Toolbar')
-        tool_bar.setIconSize(QSize(26, 26))
-        self.addToolBar(tool_bar)
+    # def createToolBar(self):
+    #     '''Set up the toolbar.'''
+    #     tool_bar = QToolBar('Main Toolbar')
+    #     tool_bar.setIconSize(QSize(26, 26))
+    #     self.addToolBar(tool_bar)
 
-        # Add actions to the toolbar
-        tool_bar.addAction(self.open_act)
-        tool_bar.addAction(self.exit_act)
-        tool_bar.addSeparator()
-        tool_bar.addAction(self.zoom_in_act)
-        tool_bar.addAction(self.zoom_out_act)
+    #     # Add actions to the toolbar
+    #     tool_bar.addAction(self.open_act)
+    #     tool_bar.addAction(self.exit_act)
+    #     tool_bar.addSeparator()
+    #     tool_bar.addAction(self.zoom_in_act)
+    #     tool_bar.addAction(self.zoom_out_act)
 
     def init_ui(self):
         '''Create an instance of the imageLabel class and set it
@@ -329,7 +403,7 @@ class PhotoEditorGUI(QMainWindow):
         row_layout_1.setSpacing(50)
         row_widget_1.setLayout(row_layout_1)
 
-        # icon_path = os.path.join(ICON_DIR, 'reset.png')
+        # icon_path = ':/icons/reset.png'
         # self.reset_button = CustomButton(icon_path=icon_path)
         # self.reset_button.setFixedSize(40, 40)
         # self.reset_button.clicked.connect(self.reset)
@@ -344,8 +418,14 @@ class PhotoEditorGUI(QMainWindow):
         self.upload_pattern_button.setFixedSize(160, 40)
         self.upload_pattern_button.clicked.connect(self.upload_pattern_images)
 
+        icon_path = ':/icons/run.png'
+        self.run_button = CustomButton(icon_path=icon_path)
+        self.run_button.setFixedSize(40, 40)
+        self.run_button.clicked.connect(self.run)
+        self.run_button.disable()
+
         icon_path = ':/icons/export.png'
-        self.export_button = CustomButton(icon_path=icon_path, text='Xuất')
+        self.export_button = CustomButton(icon_path=icon_path, text='Export')
         self.export_button.setFixedSize(160, 40)
         self.export_button.clicked.connect(self.export)
         self.export_button.disable()
@@ -354,6 +434,7 @@ class PhotoEditorGUI(QMainWindow):
         # row_layout_1.addWidget(self.reset_button)
         row_layout_1.addWidget(self.upload_main_button)
         row_layout_1.addWidget(self.upload_pattern_button)
+        row_layout_1.addWidget(self.run_button)
         row_layout_1.addWidget(self.export_button)
         row_layout_1.addStretch(1)
 
@@ -371,6 +452,22 @@ class PhotoEditorGUI(QMainWindow):
         top_widget.setLayout(self.top_layout)
         top_widget.setFixedHeight(200)
 
+        bottom_widget = QWidget()
+        bottom_layout = QHBoxLayout()
+        bottom_widget.setLayout(bottom_layout)
+
+        self.sidebar = QScrollArea()
+        self.sidebar.setBackgroundRole(QPalette.ColorRole.Dark)
+        self.sidebar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sidebar.setFixedWidth(350)
+        self.sidebar.setWidgetResizable(True)
+
+        self.sidebar_layout = QVBoxLayout()
+        self.sidebar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.sidebar_widget = QWidget()
+        self.sidebar_widget.setLayout(self.sidebar_layout)
+        self.sidebar.setWidget(self.sidebar_widget)
+
         self.image_label = ImageLabel(self)
         self.image_label.resize(self.image_label.pixmap().size())
 
@@ -380,12 +477,15 @@ class PhotoEditorGUI(QMainWindow):
 
         self.scroll_area.setWidget(self.image_label)
 
+        bottom_layout.addWidget(self.sidebar)
+        bottom_layout.addWidget(self.scroll_area)
+
         central_widget = QWidget()
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
 
         layout.addWidget(top_widget)
-        layout.addWidget(self.scroll_area)
+        layout.addWidget(bottom_widget)
 
     def updateActions(self):
         '''Update the values of menu and toolbar items when an image
@@ -403,23 +503,73 @@ class PhotoEditorGUI(QMainWindow):
     def upload_main_page(self):
         self.image_label.openImage()
 
-    def export(self):
+    def run(self):
+        if len(self.pattern_files):
+            image = self.composite_pattern_images()
+            height, width, channels = image.shape
+            bytes_per_line = channels * width
+            qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            pixmap = QPixmap.fromImage(qimage)
+            self.image_label.setPixmap(pixmap)
+        else:
+            # Show a message dialog
+            QMessageBox.warning(self, 'Không có ảnh họa tiết', 'Vui lòng tải ảnh họa tiết', QMessageBox.Ok)
+
+    def composite_pattern_images(self):
         if len(self.pattern_files):
             image_file = self.image_label.image_file
             image = cv2.imread(image_file)
 
-            points = self.image_label.points
-            for rect in points:
+            rects = self.image_label.rects
+            for rect in rects:
                 width, height = rect.width(), rect.height()
+                cx, cy = rect.center().x(), rect.center().y()
 
                 # Select a pattern randomly
                 pattern_file = random.choice(self.pattern_files)
-                pattern_image = cv2.imread(pattern_file)
-                resized_image = cv2.resize(pattern_image, (width, height))
+                pattern_image = cv2.imread(pattern_file, cv2.IMREAD_UNCHANGED)
 
-                x1, y1 = rect.x(), rect.y()
-                x2, y2 = x1 + width, y1 + height
-                image[y1:y2, x1:x2, :] = resized_image
+                if pattern_image.ndim == 2:
+                    pattern_image = cv2.cvtColor(pattern_image, cv2.COLOR_GRAY2BGR)
+
+                if pattern_image.shape[2] == 3:
+                    ph, pw = pattern_image.shape[:2]
+                    mask = np.full((pw, ph), fill_value=255, dtype=np.uint8)
+                elif pattern_image.shape[2] == 4:
+                    mask = pattern_image[:, :, 3]
+                    pattern_image = pattern_image[:, :, :3]
+                else:
+                    return
+
+                ph, pw = pattern_image.shape[:2]
+                ratio = max(ph / height, pw / width)
+
+                new_h = int(ph / ratio)
+                new_w = int(pw / ratio)
+
+                resized_image = cv2.resize(pattern_image, (new_w, new_h))
+                resized_mask = cv2.resize(mask, (new_w, new_h))
+
+                x1, y1 = cx - new_w // 2, cy - new_h // 2
+                x2, y2 = x1 + new_w, y1 + new_h
+
+                inv_mask = cv2.bitwise_not(resized_mask)
+                cropped_image = image[y1:y2, x1:x2, :].copy()
+                cropped_image = cv2.bitwise_and(cropped_image, cropped_image, mask=inv_mask)
+
+                resized_image = cv2.bitwise_and(resized_image, resized_image, mask=resized_mask)
+                blended = cv2.add(cropped_image, resized_image)
+
+                image[y1:y2, x1:x2, :] = blended
+            return image
+
+    def export(self):
+        if len(self.pattern_files):
+            image_file = self.image_label.image_file
+            image = self.composite_pattern_images()
+            if image is None:
+                QMessageBox.information(self, 'Thất bại', 'Đã có lỗi xảy ra khi chạy', QMessageBox.Ok)
+                return
 
             # save image
             output_dir = os.path.expanduser('~/Desktop')
@@ -479,6 +629,117 @@ class PhotoEditorGUI(QMainWindow):
 
     def closeEvent(self, event):
         pass
+
+
+class PatternController(QFrame):
+    x_changed = Signal(tuple)
+    y_changed = Signal(tuple)
+    width_changed = Signal(tuple)
+    height_changed = Signal(tuple)
+
+    def __init__(self, id=None, rect=None, parent=None):
+        super().__init__(parent=parent)
+
+        self.id = id
+        self.rect = rect
+
+        self.setObjectName('pattern_controller')
+        self.init_ui()
+
+        if self.rect is not None:
+            self.spin_box_x.setValue(rect.x())
+            self.spin_box_y.setValue(rect.y())
+            self.spin_box_width.setValue(rect.width())
+            self.spin_box_height.setValue(rect.height())
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Label
+        if self.id is not None:
+            text = f'Họa tiết {self.id + 1}'
+            label = QLabel(text)
+        else:
+            label = QLabel()
+        label.setStyleSheet('color: black;')
+
+        spin_widget = QWidget()
+        spin_layout = QVBoxLayout(spin_widget)
+
+        spin_layout_1 = QHBoxLayout()
+
+        # Create QLabel and QSpinBox for x
+        self.label_x = QLabel('X:')
+        self.label_x.setStyleSheet('color: black;')
+        self.spin_box_x = QSpinBox()
+        self.spin_box_x.setRange(0, 1e6)  # Set range from 0 to 100 for example
+        self.spin_box_x.valueChanged.connect(self.on_x_changed)
+
+        # Create QLabel and QSpinBox for y
+        self.label_y = QLabel('Y:')
+        self.label_y.setStyleSheet('color: black;')
+        self.spin_box_y = QSpinBox()
+        self.spin_box_y.setRange(0, 1e6)  # Set range from 0 to 100 for example
+        self.spin_box_y.valueChanged.connect(self.on_y_changed)
+
+        # Add widgets to layout
+        spin_layout_1.addWidget(self.label_x)
+        spin_layout_1.addWidget(self.spin_box_x)
+        spin_layout_1.addWidget(self.label_y)
+        spin_layout_1.addWidget(self.spin_box_y)
+
+        spin_layout_2 = QHBoxLayout()
+        # Create QLabel and QSpinBox for width
+        self.label_width = QLabel('Width:')
+        self.label_width.setStyleSheet('color: black;')
+        self.spin_box_width = QSpinBox()
+        self.spin_box_width.setRange(0, 1e6)  # Set range from 0 to 100 for example
+        self.spin_box_width.valueChanged.connect(self.on_width_changed)
+
+        # Create QLabel and QSpinBox for y
+        self.label_height = QLabel('Height:')
+        self.label_height.setStyleSheet('color: black;')
+        self.spin_box_height = QSpinBox()
+        self.spin_box_height.setRange(0, 1e6)  # Set range from 0 to 100 for example
+        self.spin_box_height.valueChanged.connect(self.on_height_changed)
+
+        # Add widgets to layout
+        spin_layout_2.addWidget(self.label_width)
+        spin_layout_2.addWidget(self.spin_box_width)
+        spin_layout_2.addWidget(self.label_height)
+        spin_layout_2.addWidget(self.spin_box_height)
+
+        spin_layout.addLayout(spin_layout_1)
+        spin_layout.addLayout(spin_layout_2)
+
+        layout.addWidget(label)
+        layout.addWidget(spin_widget)
+
+        self.setLayout(layout)
+        self.setStyleSheet("""
+            QFrame#pattern_controller {
+                border: 1px solid darkgray;
+            }
+        """)
+
+    def set_x(self, x):
+        self.spin_box_x.setValue(x)
+
+    def set_y(self, y):
+        self.spin_box_y.setValue(y)
+
+    def on_x_changed(self, value):
+        self.x_changed.emit((self.id, value))
+
+    def on_y_changed(self, value):
+        self.y_changed.emit((self.id, value))
+
+    def on_width_changed(self, value):
+        self.width_changed.emit((self.id, value))
+
+    def on_height_changed(self, value):
+        self.height_changed.emit((self.id, value))
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
